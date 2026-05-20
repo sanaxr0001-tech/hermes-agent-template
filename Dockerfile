@@ -59,10 +59,22 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
 # - We keep ui-tui/ entirely (node_modules + dist + src) so HERMES_TUI_DIR
 #   can point at it (see below).
 
+# ── Install bun + gbrain ─────────────────────────────────────────────────────
+# BUN_INSTALL=/opt/bun keeps bun out of /root (which becomes /data at runtime
+# via ENV HOME=/data) so the gbrain binary lives in the image regardless of
+# what the /data volume contains.
+ENV BUN_INSTALL=/opt/bun
+RUN curl -fsSL https://bun.sh/install | bash && \
+    /opt/bun/bin/bun install -g github:garrytan/gbrain
+ENV PATH="/opt/bun/bin:${PATH}"
+
+# gbrain stores its config and data on the same persistent volume as hermes.
+ENV GBRAIN_HOME=/data/.gbrain
+
 COPY requirements.txt /app/requirements.txt
 RUN uv pip install --system --no-cache -r /app/requirements.txt
 
-RUN mkdir -p /data/.hermes
+RUN mkdir -p /data/.hermes /data/.gbrain
 
 COPY server.py /app/server.py
 COPY templates/ /app/templates/
