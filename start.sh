@@ -43,6 +43,9 @@ if [ -n "${GBRAIN_DATABASE_URL}" ]; then
 fi
 mkdir -p /data/.gbrain
 
+echo "[gbrain] embedding model ${GBRAIN_EMBEDDING_MODEL:-unset}"
+echo "[gbrain] embedding dimensions ${GBRAIN_EMBEDDING_DIMENSIONS:-unset}"
+
 # Verify gbrain binary exists
 if ! command -v gbrain >/dev/null 2>&1; then
   echo "[gbrain] ERROR: gbrain binary not found in PATH=$(echo $PATH)"
