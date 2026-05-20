@@ -173,6 +173,16 @@ INFRA_ENV_EXACT = {
     "ZEROENTROPHY_API_KEY",
 }
 INFRA_ENV_PREFIXES = ("GBRAIN_", "RAILWAY_")
+PROCESS_ENV_EXACT = {
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONUNBUFFERED",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "PORT",
+    "HERMES_TUI_DIR",
+}
 
 
 def is_infra_env_key(key: str) -> bool:
@@ -185,7 +195,11 @@ def build_gateway_env() -> dict[str, str]:
     Hermes setup UI owns model/provider/channel settings in /data/.hermes/.env.
     Railway owns deployment/runtime values such as GBRAIN_* and DATABASE_URL.
     """
-    env = {**os.environ}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in PROCESS_ENV_EXACT
+    }
     env.update(read_env(ENV_FILE))
     for key, value in os.environ.items():
         if is_infra_env_key(key):
