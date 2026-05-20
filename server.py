@@ -164,6 +164,36 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+INFRA_ENV_EXACT = {
+    "DATABASE_URL",
+    "HOME",
+    "HERMES_HOME",
+    "OPENCLAW_WORKSPACE",
+    "ZEROENTROPY_API_KEY",
+    "ZEROENTROPHY_API_KEY",
+}
+INFRA_ENV_PREFIXES = ("GBRAIN_", "RAILWAY_")
+
+
+def is_infra_env_key(key: str) -> bool:
+    return key in INFRA_ENV_EXACT or any(key.startswith(prefix) for prefix in INFRA_ENV_PREFIXES)
+
+
+def build_gateway_env() -> dict[str, str]:
+    """Merge Hermes .env with the container env without shadowing infra vars.
+
+    Hermes setup UI owns model/provider/channel settings in /data/.hermes/.env.
+    Railway owns deployment/runtime values such as GBRAIN_* and DATABASE_URL.
+    """
+    env = {**os.environ}
+    env.update(read_env(ENV_FILE))
+    for key, value in os.environ.items():
+        if is_infra_env_key(key):
+            env[key] = value
+    env["HERMES_HOME"] = HERMES_HOME
+    return env
+
+
 def write_config_yaml(data: dict[str, str]) -> None:
     """Write config.yaml — deep-merge template defaults with any existing user/cron-managed sections.
 
@@ -735,16 +765,12 @@ class Gateway:
             return
         self.state = "starting"
         try:
-            # .env values take priority over Railway env vars.
-            # We build the env this way so hermes's own dotenv loading
-            # (which reads the same file) doesn't shadow our values.
-            env = {**os.environ, "HERMES_HOME": HERMES_HOME}
-            env.update(read_env(ENV_FILE))
+            env = build_gateway_env()
             model = env.get("LLM_MODEL", "")
             provider_key = next((env.get(k, "") for k in PROVIDER_KEYS if env.get(k)), "")
             print(f"[gateway] model={model or '⚠ NOT SET'} | provider_key={'set' if provider_key else '⚠ NOT SET'}", flush=True)
             # Write config.yaml so hermes picks up the model (env vars alone aren't always enough)
-            write_config_yaml(read_env(ENV_FILE))
+            write_config_yaml(env)
             self.proc = await asyncio.create_subprocess_exec(
                 "hermes", "gateway",
                 stdout=asyncio.subprocess.PIPE,

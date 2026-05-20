@@ -37,6 +37,10 @@ rm -f /data/.hermes/gateway.pid
 
 # ── gbrain setup ─────────────────────────────────────────────────────────────
 echo "[gbrain] starting setup..."
+export GBRAIN_HOME="${GBRAIN_HOME:-/data}"
+if [ -n "${GBRAIN_DATABASE_URL}" ]; then
+  export DATABASE_URL="${GBRAIN_DATABASE_URL}"
+fi
 mkdir -p /data/.gbrain
 
 # Verify gbrain binary exists
@@ -77,22 +81,9 @@ else
   echo "[gbrain] WARNING: GBRAIN_DATABASE_URL is not set — skipping setup"
 fi
 
-# Inject API keys and apply any pending schema migrations.
+# Upstream gbrain reads provider credentials from process env. Keep secrets out
+# of persistent config.json and only run migrations / skillpack setup here.
 if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
-  _ZE_KEY="${ZEROENTROPY_API_KEY:-${ZEROENTROPHY_API_KEY}}"
-  if [ -n "$_ZE_KEY" ]; then
-    echo "[gbrain] setting zeroentropy_api_key..."
-    gbrain config set zeroentropy_api_key "$_ZE_KEY" && echo "[gbrain] zeroentropy key set" || echo "[gbrain] WARNING: failed to set zeroentropy key"
-  fi
-  if [ -n "${ANTHROPIC_API_KEY}" ]; then
-    echo "[gbrain] setting anthropic_api_key..."
-    gbrain config set anthropic_api_key "${ANTHROPIC_API_KEY}" && echo "[gbrain] anthropic key set" || echo "[gbrain] WARNING: failed to set anthropic key"
-  fi
-  if [ -n "${OPENAI_API_KEY}" ]; then
-    echo "[gbrain] setting openai_api_key..."
-    gbrain config set openai_api_key "${OPENAI_API_KEY}" && echo "[gbrain] openai key set" || echo "[gbrain] WARNING: failed to set openai key"
-  fi
-
   echo "[gbrain] applying migrations..."
   gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 

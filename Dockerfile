@@ -76,8 +76,9 @@ RUN curl -fsSL https://bun.sh/install | bash && \
     /opt/bun/bin/bun link
 ENV PATH="/opt/bun/bin:${PATH}"
 
-# gbrain stores its config and data on the same persistent volume as hermes.
-ENV GBRAIN_HOME=/data/.gbrain
+# gbrain treats GBRAIN_HOME as a parent directory and appends ".gbrain".
+# With HOME=/data below, this resolves to /data/.gbrain on the Railway volume.
+ENV GBRAIN_HOME=/data
 
 COPY requirements.txt /app/requirements.txt
 RUN uv pip install --system --no-cache -r /app/requirements.txt
