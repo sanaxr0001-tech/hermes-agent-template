@@ -36,29 +36,54 @@ fi
 rm -f /data/.hermes/gateway.pid
 
 # ── gbrain setup ─────────────────────────────────────────────────────────────
+echo "[gbrain] starting setup..."
 mkdir -p /data/.gbrain
 
+# Verify gbrain binary exists
+if ! command -v gbrain >/dev/null 2>&1; then
+  echo "[gbrain] ERROR: gbrain binary not found in PATH=$(echo $PATH)"
+  echo "[gbrain] checking /opt/bun/bin..."
+  ls /opt/bun/bin/ 2>&1 || echo "[gbrain] /opt/bun/bin not found"
+else
+  echo "[gbrain] binary found at $(which gbrain)"
+fi
+
 # Bootstrap gbrain config pointing at Supabase on first run.
-# GBRAIN_DATABASE_URL must be set as a Railway environment variable.
 if [ ! -f /data/.gbrain/config.json ] && [ -n "${GBRAIN_DATABASE_URL}" ]; then
+  echo "[gbrain] writing config.json..."
   printf '{"engine":"postgres","database_url":"%s"}\n' "${GBRAIN_DATABASE_URL}" \
     > /data/.gbrain/config.json
   chmod 600 /data/.gbrain/config.json
+  echo "[gbrain] config.json written"
+elif [ -z "${GBRAIN_DATABASE_URL}" ]; then
+  echo "[gbrain] WARNING: GBRAIN_DATABASE_URL is not set — skipping setup"
+else
+  echo "[gbrain] config.json already exists"
 fi
 
 # Inject API keys and apply any pending schema migrations.
-if [ -n "${GBRAIN_DATABASE_URL}" ]; then
-  # Handle both spellings — Railway var was saved as ZEROENTROPHY (typo) vs ZEROENTROPY (correct)
+if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
   _ZE_KEY="${ZEROENTROPY_API_KEY:-${ZEROENTROPHY_API_KEY}}"
-  [ -n "$_ZE_KEY" ] && gbrain config set zeroentropy_api_key "$_ZE_KEY" 2>/dev/null || true
-  [ -n "${ANTHROPIC_API_KEY}" ]   && gbrain config set anthropic_api_key   "${ANTHROPIC_API_KEY}"   2>/dev/null || true
+  if [ -n "$_ZE_KEY" ]; then
+    echo "[gbrain] setting zeroentropy_api_key..."
+    gbrain config set zeroentropy_api_key "$_ZE_KEY" && echo "[gbrain] zeroentropy key set" || echo "[gbrain] WARNING: failed to set zeroentropy key"
+  fi
+  if [ -n "${ANTHROPIC_API_KEY}" ]; then
+    echo "[gbrain] setting anthropic_api_key..."
+    gbrain config set anthropic_api_key "${ANTHROPIC_API_KEY}" && echo "[gbrain] anthropic key set" || echo "[gbrain] WARNING: failed to set anthropic key"
+  fi
 
-  gbrain apply-migrations --yes 2>/dev/null || true
+  echo "[gbrain] applying migrations..."
+  gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 
-  # Scaffold gbrain skillpack into hermes once (routing, brain-ops, etc.)
   if [ ! -f /data/.hermes/skills/RESOLVER.md ]; then
-    cd /data/.hermes && gbrain skillpack scaffold --all 2>/dev/null || true
+    echo "[gbrain] scaffolding skillpack into hermes..."
+    cd /data/.hermes && gbrain skillpack scaffold --all && echo "[gbrain] skillpack scaffolded" || echo "[gbrain] WARNING: skillpack scaffold failed"
+  else
+    echo "[gbrain] skillpack already scaffolded"
   fi
 fi
+
+echo "[gbrain] setup complete"
 
 exec python /app/server.py
