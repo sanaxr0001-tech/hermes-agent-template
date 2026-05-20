@@ -48,17 +48,33 @@ else
   echo "[gbrain] binary found at $(which gbrain)"
 fi
 
-# Bootstrap gbrain config pointing at Supabase on first run.
-if [ ! -f /data/.gbrain/config.json ] && [ -n "${GBRAIN_DATABASE_URL}" ]; then
-  echo "[gbrain] writing config.json..."
-  printf '{"engine":"postgres","database_url":"%s"}\n' "${GBRAIN_DATABASE_URL}" \
-    > /data/.gbrain/config.json
-  chmod 600 /data/.gbrain/config.json
-  echo "[gbrain] config.json written"
-elif [ -z "${GBRAIN_DATABASE_URL}" ]; then
-  echo "[gbrain] WARNING: GBRAIN_DATABASE_URL is not set — skipping setup"
+# Bootstrap or refresh gbrain config from Railway env. /data is persistent, so
+# the previous config can outlive Railway var changes unless we update it here.
+if [ -n "${GBRAIN_DATABASE_URL}" ]; then
+  echo "[gbrain] refreshing config.json from GBRAIN_DATABASE_URL..."
+  node -e '
+const fs = require("fs");
+const path = "/data/.gbrain/config.json";
+let cfg = {};
+try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
+cfg.engine = "postgres";
+cfg.database_url = process.env.GBRAIN_DATABASE_URL;
+fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+fs.chmodSync(path, 0o600);
+try {
+  const url = new URL(process.env.GBRAIN_DATABASE_URL);
+  const port = url.port || "(default)";
+  console.log(`[gbrain] database target ${url.hostname}:${port}`);
+  if (url.port === "5432") {
+    console.log("[gbrain] NOTE: Supabase direct port 5432 may be unreachable from Railway; use the pooler URL/port 6543 if connection is refused");
+  }
+} catch {
+  console.log("[gbrain] WARNING: GBRAIN_DATABASE_URL could not be parsed for diagnostics");
+}
+'
+  echo "[gbrain] config.json refreshed"
 else
-  echo "[gbrain] config.json already exists"
+  echo "[gbrain] WARNING: GBRAIN_DATABASE_URL is not set — skipping setup"
 fi
 
 # Inject API keys and apply any pending schema migrations.
@@ -72,13 +88,39 @@ if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
     echo "[gbrain] setting anthropic_api_key..."
     gbrain config set anthropic_api_key "${ANTHROPIC_API_KEY}" && echo "[gbrain] anthropic key set" || echo "[gbrain] WARNING: failed to set anthropic key"
   fi
+  if [ -n "${OPENAI_API_KEY}" ]; then
+    echo "[gbrain] setting openai_api_key..."
+    gbrain config set openai_api_key "${OPENAI_API_KEY}" && echo "[gbrain] openai key set" || echo "[gbrain] WARNING: failed to set openai key"
+  fi
 
   echo "[gbrain] applying migrations..."
   gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 
-  if [ ! -f /data/.hermes/skills/RESOLVER.md ]; then
-    echo "[gbrain] scaffolding skillpack into hermes..."
-    cd /data/.hermes && gbrain skillpack scaffold --all && echo "[gbrain] skillpack scaffolded" || echo "[gbrain] WARNING: skillpack scaffold failed"
+  if [ ! -f /data/.hermes/skills/RESOLVER.md ] || [ ! -d /data/.hermes/skills/brain-ops ]; then
+    echo "[gbrain] installing skillpack into hermes..."
+    if [ ! -d /opt/gbrain ]; then
+      echo "[gbrain] WARNING: /opt/gbrain source checkout not found; skillpack install skipped"
+    else
+      if [ ! -f /data/.hermes/skills/RESOLVER.md ]; then
+        printf '# Hermes Skills Resolver\n\n' > /data/.hermes/skills/RESOLVER.md
+      fi
+
+      if (cd /opt/gbrain && OPENCLAW_WORKSPACE=/data/.hermes gbrain skillpack scaffold --all) && [ -d /data/.hermes/skills/brain-ops ]; then
+        echo "[gbrain] skillpack scaffolded"
+      else
+        echo "[gbrain] skillpack scaffold did not populate Hermes; trying skillpack install --all..."
+        if (cd /opt/gbrain && OPENCLAW_WORKSPACE=/data/.hermes gbrain skillpack install --all); then
+          echo "[gbrain] skillpack installed"
+        else
+          _SKILLPACK_STATUS=$?
+          if [ "$_SKILLPACK_STATUS" -eq 1 ]; then
+            echo "[gbrain] skillpack install completed with local-edit skips"
+          else
+            echo "[gbrain] WARNING: skillpack install failed"
+          fi
+        fi
+      fi
+    fi
   else
     echo "[gbrain] skillpack already scaffolded"
   fi

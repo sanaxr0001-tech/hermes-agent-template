@@ -63,9 +63,17 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
 # BUN_INSTALL=/opt/bun keeps bun out of /root (which becomes /data at runtime
 # via ENV HOME=/data) so the gbrain binary lives in the image regardless of
 # what the /data volume contains.
+#
+# Keep the gbrain source checkout in /opt/gbrain. The skillpack CLI resolves
+# bundled skills by walking up from cwd to a gbrain repo root, so a global-only
+# install can run the binary but cannot scaffold/install the bundled skillpack.
+ARG GBRAIN_REF=master
 ENV BUN_INSTALL=/opt/bun
 RUN curl -fsSL https://bun.sh/install | bash && \
-    /opt/bun/bin/bun install -g github:garrytan/gbrain
+    git clone --depth 1 --branch ${GBRAIN_REF} https://github.com/garrytan/gbrain.git /opt/gbrain && \
+    cd /opt/gbrain && \
+    /opt/bun/bin/bun install && \
+    /opt/bun/bin/bun link
 ENV PATH="/opt/bun/bin:${PATH}"
 
 # gbrain stores its config and data on the same persistent volume as hermes.
