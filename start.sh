@@ -53,6 +53,12 @@ else
   if [ -d /opt/gbrain/.git ]; then
     echo "[gbrain] source commit $(cd /opt/gbrain && git rev-parse --short HEAD)"
   fi
+  if gbrain providers list >/tmp/gbrain-providers.txt 2>&1 && grep -qi 'zeroentropy' /tmp/gbrain-providers.txt; then
+    echo "[gbrain] zeroentropy provider registered"
+  else
+    echo "[gbrain] WARNING: zeroentropy provider not visible in gbrain providers list"
+    sed -n '1,40p' /tmp/gbrain-providers.txt 2>/dev/null || true
+  fi
 fi
 
 # Bootstrap or refresh gbrain config from Railway env. /data is persistent, so

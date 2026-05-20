@@ -80,7 +80,11 @@ RUN curl -fsSL https://bun.sh/install | bash && \
     git checkout --detach FETCH_HEAD && \
     git rev-parse HEAD && \
     /opt/bun/bin/bun install && \
-    /opt/bun/bin/bun link
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'exec /opt/bun/bin/bun /opt/gbrain/src/cli.ts "$@"' \
+      > /opt/bun/bin/gbrain && \
+    chmod +x /opt/bun/bin/gbrain
 ENV PATH="/opt/bun/bin:${PATH}"
 
 # gbrain treats GBRAIN_HOME as a parent directory and appends ".gbrain".
