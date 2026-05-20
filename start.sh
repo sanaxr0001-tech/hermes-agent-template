@@ -50,6 +50,9 @@ if ! command -v gbrain >/dev/null 2>&1; then
   ls /opt/bun/bin/ 2>&1 || echo "[gbrain] /opt/bun/bin not found"
 else
   echo "[gbrain] binary found at $(which gbrain)"
+  if [ -d /opt/gbrain/.git ]; then
+    echo "[gbrain] source commit $(cd /opt/gbrain && git rev-parse --short HEAD)"
+  fi
 fi
 
 # Bootstrap or refresh gbrain config from Railway env. /data is persistent, so

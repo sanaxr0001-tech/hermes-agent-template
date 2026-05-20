@@ -67,11 +67,18 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
 # Keep the gbrain source checkout in /opt/gbrain. The skillpack CLI resolves
 # bundled skills by walking up from cwd to a gbrain repo root, so a global-only
 # install can run the binary but cannot scaffold/install the bundled skillpack.
-ARG GBRAIN_REF=master
+#
+# Pin the upstream ref so Docker/Railway cache cannot silently reuse an older
+# master checkout. Bump this to the current garrytan/gbrain HEAD when updating.
+ARG GBRAIN_REF=772253ef44bbaff99df9229b61b6c976a73dc307
 ENV BUN_INSTALL=/opt/bun
 RUN curl -fsSL https://bun.sh/install | bash && \
-    git clone --depth 1 --branch ${GBRAIN_REF} https://github.com/garrytan/gbrain.git /opt/gbrain && \
+    git init /opt/gbrain && \
     cd /opt/gbrain && \
+    git remote add origin https://github.com/garrytan/gbrain.git && \
+    git fetch --depth 1 origin ${GBRAIN_REF} && \
+    git checkout --detach FETCH_HEAD && \
+    git rev-parse HEAD && \
     /opt/bun/bin/bun install && \
     /opt/bun/bin/bun link
 ENV PATH="/opt/bun/bin:${PATH}"
