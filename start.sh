@@ -82,8 +82,10 @@ else
 fi
 
 # Upstream gbrain reads provider credentials from process env. Keep secrets out
-# of persistent config.json and only run migrations / skillpack setup here.
-if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
+# of persistent config.json. Run migrations / skillpack setup after the web
+# server starts so Railway's healthcheck is not blocked by long idempotent
+# migration logs on existing Supabase databases.
+run_gbrain_post_boot_setup() {
   echo "[gbrain] applying migrations..."
   gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 
@@ -115,8 +117,13 @@ if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
   else
     echo "[gbrain] skillpack already scaffolded"
   fi
+  echo "[gbrain] setup complete"
+}
+
+if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
+  run_gbrain_post_boot_setup &
 fi
 
-echo "[gbrain] setup complete"
+echo "[gbrain] setup scheduled"
 
 exec python /app/server.py
