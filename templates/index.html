@@ -837,13 +837,60 @@
             <label class="field-label">LLM Model</label>
             <input type="text" :value="vars.LLM_MODEL||''" @input="vars.LLM_MODEL=$event.target.value"
                    :placeholder="selectedProvider === 'xAI Grok (SuperGrok)' ? 'e.g. grok-4.3'
+                     : selectedProvider === 'OpenAI Codex (OAuth)' ? 'gpt-5.5'
                      : selectedProvider === 'Fireworks AI' ? 'e.g. accounts/fireworks/models/llama-v3p1-70b-instruct'
                      : selectedProvider === 'Custom Endpoint' ? 'model-id as required by the endpoint'
                      : 'e.g. openai/gpt-4o-mini  or  deepseek/deepseek-chat'">
             <p class="hint" x-show="selectedProvider === 'xAI Grok (SuperGrok)'">Model name only — e.g. <code>grok-4.3</code>, <code>grok-4.20-0309-reasoning</code></p>
+            <p class="hint" x-show="selectedProvider === 'OpenAI Codex (OAuth)'">Model name only — e.g. <code>gpt-5.5</code>, <code>gpt-5.4</code>, <code>gpt-5.3-codex</code></p>
             <p class="hint" x-show="selectedProvider === 'Fireworks AI'">Format: <code>accounts/fireworks/models/&lt;model-id&gt;</code></p>
-            <p class="hint" x-show="selectedProvider !== 'xAI Grok (SuperGrok)' && selectedProvider !== 'Fireworks AI' && selectedProvider !== 'Custom Endpoint'">OpenRouter format: <code>provider/model-name</code></p>
+            <p class="hint" x-show="selectedProvider !== 'xAI Grok (SuperGrok)' && selectedProvider !== 'OpenAI Codex (OAuth)' && selectedProvider !== 'Fireworks AI' && selectedProvider !== 'Custom Endpoint'">OpenRouter format: <code>provider/model-name</code></p>
           </div>
+        </div>
+
+        <!-- OpenAI Codex OAuth — shown when Codex provider is selected -->
+        <div class="card" x-show="selectedProvider === 'OpenAI Codex (OAuth)'" style="border-left:3px solid #6272ff;padding:14px 16px;">
+          <p style="margin:0 0 10px;font-size:13px;font-weight:600;color:#c9d1d9;">OpenAI Codex OAuth</p>
+
+          <template x-if="codex.status === 'none'">
+            <div>
+              <p class="hint" style="margin:0 0 10px;">Connect your ChatGPT/Codex account. A new tab will open where you enter a short code. Hermes stores its own refreshable session in <code>auth.json</code>.</p>
+              <button class="btn primary" style="width:100%;" @click="startCodexOauth()" :disabled="codex.loading">
+                <span x-show="!codex.loading">Connect Codex</span>
+                <span x-show="codex.loading">Starting...</span>
+              </button>
+              <p x-show="codex.error" x-text="codex.error" style="color:var(--red);margin:8px 0 0;font-size:12px;"></p>
+            </div>
+          </template>
+
+          <template x-if="codex.status === 'pending'">
+            <div>
+              <p class="hint" style="margin:0 0 8px;">A new tab opened. Enter the code below on the OpenAI page, then come back here.</p>
+              <a :href="codex.verificationUri" target="_blank"
+                 style="display:block;color:var(--accent2);font-size:12px;word-break:break-all;margin-bottom:10px;"
+                 x-text="codex.verificationUri"></a>
+              <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:14px;text-align:center;margin-bottom:10px;">
+                <span style="font-family:var(--font-mono);font-size:26px;letter-spacing:5px;color:#c9d1d9;" x-text="codex.userCode"></span>
+              </div>
+              <p class="hint" style="text-align:center;margin:0;">Waiting for authorization...</p>
+            </div>
+          </template>
+
+          <template x-if="codex.status === 'authorized'">
+            <div style="text-align:center;padding:6px 0;">
+              <p style="color:var(--green);font-size:13px;margin:0 0 4px;">Codex authorized</p>
+              <p class="hint" style="margin:0;">Gateway is restarting with OpenAI Codex OAuth.</p>
+            </div>
+          </template>
+
+          <template x-if="codex.status === 'error' || codex.status === 'expired'">
+            <div>
+              <p style="color:var(--red);font-size:13px;margin:0 0 8px;" x-text="codex.error || 'Authorization failed or expired'"></p>
+              <button class="btn primary" style="width:100%;" @click="codex.status='none'; codex.error=''; startCodexOauth()">
+                Try Again
+              </button>
+            </div>
+          </template>
         </div>
 
         <!-- xAI Grok SuperGrok OAuth — shown when xAI provider is selected -->
@@ -1393,10 +1440,12 @@ function app() {
       'Google AI Studio':     { key: 'GEMINI_API_KEY',         modelKey: '_MODEL_GEMINI_API_KEY',         placeholder: 'AIza...'   },
       'Fireworks AI':         { key: 'FIREWORKS_API_KEY',      modelKey: '_MODEL_FIREWORKS_API_KEY',      placeholder: 'fw_...'    },
       'Custom Endpoint':      { key: 'CUSTOM_PROVIDER_API_KEY',modelKey: '_MODEL_CUSTOM_PROVIDER_API_KEY',placeholder: '',         isCustom: true },
+      'OpenAI Codex (OAuth)': { key: null,                     modelKey: '_MODEL_OPENAI_CODEX',           isOauth: 'codex' },
       'xAI Grok (SuperGrok)': { key: null,                     modelKey: '_MODEL_XAI_OAUTH',              isOauth: 'xai' },
     },
 
     xai: { loading: false, userCode: '', verificationUri: '', status: 'none', error: '' },
+    codex: { loading: false, userCode: '', verificationUri: '', status: 'none', error: '' },
 
     selectedProvider: '',
 
@@ -1415,6 +1464,10 @@ function app() {
         if (p.isOauth === 'xai') {
           if (this.xai.status === 'authorized') {
             list.push({ providerKey: name, name, model: this.vars['_MODEL_XAI_OAUTH'] || '', isOauth: true });
+          }
+        } else if (p.isOauth === 'codex') {
+          if (this.codex.status === 'authorized') {
+            list.push({ providerKey: name, name, model: this.vars['_MODEL_OPENAI_CODEX'] || '', isOauth: true });
           }
         } else if (p.isCustom && this.vars[p.key]) {
           const displayName = this.vars.CUSTOM_PROVIDER_NAME || this.vars.CUSTOM_PROVIDER_BASE_URL || 'Custom Endpoint';
@@ -1443,6 +1496,12 @@ function app() {
         this.xai.verificationUri = '';
         this.xai.error = '';
       }
+      if (p.isOauth !== 'codex' && this.codex.status !== 'authorized') {
+        this.codex.status = 'none';
+        this.codex.userCode = '';
+        this.codex.verificationUri = '';
+        this.codex.error = '';
+      }
     },
 
     async removeProvider(providerKey) {
@@ -1452,6 +1511,10 @@ function app() {
       if (p.isOauth === 'xai') {
         await fetch('/setup/api/oauth/xai', { method: 'DELETE' });
         this.xai.status = 'none';
+      }
+      if (p.isOauth === 'codex') {
+        await fetch('/setup/api/oauth/codex', { method: 'DELETE' });
+        this.codex.status = 'none';
       }
       if (p.key)      this.vars[p.key]      = '';
       if (p.modelKey) this.vars[p.modelKey] = '';
@@ -1519,6 +1582,36 @@ function app() {
       this.xai.loading = false;
     },
 
+    async startCodexOauth() {
+      this.codex.loading = true;
+      this.codex.error = '';
+      try {
+        const r = await fetch('/setup/api/oauth/codex/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: this.vars.LLM_MODEL || 'gpt-5.5' }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.codex.error = d.error || 'Failed to start OAuth'; this.codex.loading = false; return; }
+        this.codex.userCode = d.user_code;
+        this.codex.verificationUri = d.verification_uri;
+        this.codex.status = 'pending';
+        window.open(d.verification_uri, '_blank');
+        const poll = setInterval(async () => {
+          const s = await fetch('/setup/api/oauth/codex/status').then(r2 => r2.json()).catch(() => ({ status: 'pending' }));
+          this.codex.status = s.status;
+          if (s.status === 'authorized') {
+            clearInterval(poll);
+            await this.loadConfig();
+          } else if (s.status === 'error' || s.status === 'expired') {
+            this.codex.error = s.error || 'Authorization failed or expired';
+            clearInterval(poll);
+          }
+        }, 3000);
+      } catch (e) { this.codex.error = 'Network error: ' + e.message; }
+      this.codex.loading = false;
+    },
+
     async init() {
       await Promise.all([this.loadConfig(), this.loadStatus(), this.loadLogs(), this.loadPairing()]);
       setInterval(() => this.loadStatus(),  5000);
@@ -1535,6 +1628,8 @@ function app() {
           // Refresh xAI OAuth status (drives configuredProviders computed getter).
           const xs = await fetch('/setup/api/oauth/xai/status').then(r2 => r2.json()).catch(() => ({ status: 'none' }));
           this.xai.status = xs.status;
+          const cs = await fetch('/setup/api/oauth/codex/status').then(r2 => r2.json()).catch(() => ({ status: 'none' }));
+          this.codex.status = cs.status;
           // Detect active channels
           this.channelsEnabled = {
             telegram:   !!(this.vars.TELEGRAM_BOT_TOKEN),

@@ -245,11 +245,11 @@ def write_config_yaml(data: dict[str, str]) -> None:
     # Deployment-managed (always authoritative — these reflect the runtime env).
     merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
     merged_model["default"] = model
-    # Only force provider="auto" when a known API key is configured. If no
-    # API key is set, the user likely configured an OAuth provider (xai-oauth,
-    # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
-    # so a container restart doesn't revert it to "auto" and break their session.
-    if any(data.get(k) for k in PROVIDER_KEYS):
+    # Only force provider="auto" when a known API key is configured and there
+    # is no active OAuth provider. OAuth tokens live in auth.json, so old API
+    # keys in .env must not steal the model route on container restart.
+    current_provider = str(merged_model.get("provider", "") or "").strip()
+    if any(data.get(k) for k in PROVIDER_KEYS) and not _has_oauth_provider_tokens(current_provider):
         merged_model["provider"] = "auto"
     merged["model"] = merged_model
 
@@ -320,34 +320,31 @@ def write_env(path: Path, data: dict[str, str]) -> None:
     path.write_text("\n".join(lines))
 
 
-# ── xAI Grok SuperGrok OAuth (Device Code — RFC 8628) ───────────────────────
-# xAI's OIDC discovery at https://auth.x.ai/.well-known/openid-configuration
-# declares device_authorization_endpoint, so Device Code flow works without
-# any redirect URL. The client_id matches hermes's own Grok CLI credential.
-_XAI_CLIENT_ID   = "b1a00492-073a-47ea-816f-4c329264a828"
-_XAI_SCOPE       = "openid profile email offline_access grok-cli:access api:access"
-_XAI_DEVICE_URL  = "https://auth.x.ai/oauth2/device/code"
-_XAI_TOKEN_URL   = "https://auth.x.ai/oauth2/token"
-_XAI_GRANT_TYPE  = "urn:ietf:params:oauth:grant-type:device_code"
-
-_xai_oauth_state: dict | None = None  # one auth at a time (single-user deployment)
+# ── OAuth providers ─────────────────────────────────────────────────────────
+_OAUTH_PROVIDER_MODEL_KEYS = {
+    "openai-codex": "_MODEL_OPENAI_CODEX",
+    "xai-oauth": "_MODEL_XAI_OAUTH",
+}
 
 
-def _has_xai_oauth_tokens() -> bool:
-    """True when auth.json contains a valid xAI OAuth refresh token."""
+def _has_oauth_provider_tokens(provider: str) -> bool:
+    """True when auth.json contains refresh-capable OAuth tokens for provider."""
+    provider = (provider or "").strip()
+    if not provider:
+        return False
     auth_path = Path(HERMES_HOME) / "auth.json"
     if not auth_path.exists():
         return False
     try:
         data = json.loads(auth_path.read_text())
-        tokens = data.get("providers", {}).get("xai-oauth", {}).get("tokens", {})
-        return bool(isinstance(tokens, dict) and tokens.get("refresh_token"))
+        tokens = data.get("providers", {}).get(provider, {}).get("tokens", {})
+        return bool(isinstance(tokens, dict) and (tokens.get("refresh_token") or tokens.get("access_token")))
     except Exception:
         return False
 
 
-def _save_xai_auth_json(tokens: dict) -> None:
-    """Write xAI OAuth tokens to auth.json in hermes's expected format."""
+def _save_oauth_provider_state(provider: str, state: dict) -> None:
+    """Merge one OAuth provider state into Hermes auth.json."""
     auth_path = Path(HERMES_HOME) / "auth.json"
     existing: dict = {}
     if auth_path.exists():
@@ -359,20 +356,15 @@ def _save_xai_auth_json(tokens: dict) -> None:
         existing = {}
 
     providers = existing.setdefault("providers", {})
-    providers["xai-oauth"] = {
-        "tokens": tokens,
-        "auth_mode": "oauth_device",
-        "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "discovery": {
-            "authorization_endpoint": "https://auth.x.ai/oauth2/authorize",
-            "token_endpoint": _XAI_TOKEN_URL,
-        },
-        "redirect_uri": "",
-    }
-    existing["active_provider"] = "xai-oauth"
+    if not isinstance(providers, dict):
+        providers = {}
+        existing["providers"] = providers
+    providers[provider] = state
+    existing["active_provider"] = provider
     existing["version"] = 2
     existing["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
     auth_path.write_text(json.dumps(existing, indent=2) + "\n")
     try:
         auth_path.chmod(0o600)
@@ -380,8 +372,22 @@ def _save_xai_auth_json(tokens: dict) -> None:
         pass
 
 
-def _apply_xai_oauth_config(model: str) -> None:
-    """Write config.yaml with provider=xai-oauth and the chosen model."""
+def _delete_oauth_provider_state(provider: str) -> None:
+    auth_path = Path(HERMES_HOME) / "auth.json"
+    if not auth_path.exists():
+        return
+    try:
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+        data.get("providers", {}).pop(provider, None)
+        if data.get("active_provider") == provider:
+            data.pop("active_provider", None)
+        auth_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _apply_oauth_provider_config(provider: str, model: str, base_url: str = "") -> None:
+    """Write config.yaml and .env for an OAuth-backed model provider."""
     import yaml
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +405,13 @@ def _apply_xai_oauth_config(model: str) -> None:
     merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
     if model:
         merged_model["default"] = model
-    merged_model["provider"] = "xai-oauth"
+    merged_model["provider"] = provider
+    if base_url:
+        merged_model["base_url"] = base_url.rstrip("/")
+    else:
+        merged_model.pop("base_url", None)
+    merged_model.pop("api_key", None)
+    merged_model.pop("api_mode", None)
     merged["model"] = merged_model
 
     merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})
@@ -416,13 +428,57 @@ def _apply_xai_oauth_config(model: str) -> None:
     with config_path.open("w") as f:
         yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
 
-    # Persist LLM_MODEL and track the per-provider model so the setup UI can
-    # display it alongside the xAI entry in the "Configured Providers" list.
     if model:
         existing_env = read_env(ENV_FILE)
         existing_env["LLM_MODEL"] = model
-        existing_env["_MODEL_XAI_OAUTH"] = model
+        model_key = _OAUTH_PROVIDER_MODEL_KEYS.get(provider)
+        if model_key:
+            existing_env[model_key] = model
         write_env(ENV_FILE, existing_env)
+
+
+# ── xAI Grok SuperGrok OAuth (Device Code — RFC 8628) ───────────────────────
+# xAI's OIDC discovery at https://auth.x.ai/.well-known/openid-configuration
+# declares device_authorization_endpoint, so Device Code flow works without
+# any redirect URL. The client_id matches hermes's own Grok CLI credential.
+_XAI_CLIENT_ID   = "b1a00492-073a-47ea-816f-4c329264a828"
+_XAI_SCOPE       = "openid profile email offline_access grok-cli:access api:access"
+_XAI_DEVICE_URL  = "https://auth.x.ai/oauth2/device/code"
+_XAI_TOKEN_URL   = "https://auth.x.ai/oauth2/token"
+_XAI_GRANT_TYPE  = "urn:ietf:params:oauth:grant-type:device_code"
+
+_xai_oauth_state: dict | None = None  # one auth at a time (single-user deployment)
+
+_CODEX_ISSUER = "https://auth.openai.com"
+_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+_codex_oauth_state: dict | None = None
+
+
+def _has_xai_oauth_tokens() -> bool:
+    """True when auth.json contains a valid xAI OAuth refresh token."""
+    return _has_oauth_provider_tokens("xai-oauth")
+
+
+def _save_xai_auth_json(tokens: dict) -> None:
+    """Write xAI OAuth tokens to auth.json in hermes's expected format."""
+    _save_oauth_provider_state("xai-oauth", {
+        "tokens": tokens,
+        "auth_mode": "oauth_device",
+        "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "discovery": {
+            "authorization_endpoint": "https://auth.x.ai/oauth2/authorize",
+            "token_endpoint": _XAI_TOKEN_URL,
+        },
+        "redirect_uri": "",
+    })
+
+
+def _apply_xai_oauth_config(model: str) -> None:
+    """Write config.yaml with provider=xai-oauth and the chosen model."""
+    _apply_oauth_provider_config("xai-oauth", model)
 
 
 async def _poll_xai_device_auth(state: dict) -> None:
@@ -565,6 +621,192 @@ async def api_oauth_xai_status(request: Request) -> Response:
     })
 
 
+def _has_codex_oauth_tokens() -> bool:
+    """True when auth.json contains OpenAI Codex OAuth tokens."""
+    return _has_oauth_provider_tokens("openai-codex")
+
+
+def _save_codex_auth_json(tokens: dict, last_refresh: str = "") -> None:
+    _save_oauth_provider_state("openai-codex", {
+        "tokens": {
+            "access_token": tokens.get("access_token", ""),
+            "refresh_token": tokens.get("refresh_token", ""),
+        },
+        "base_url": _CODEX_BASE_URL,
+        "last_refresh": last_refresh or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "auth_mode": "chatgpt",
+        "source": "device-code",
+    })
+
+
+async def _poll_codex_device_auth(state: dict) -> None:
+    """Poll OpenAI device auth, exchange the code, then switch Hermes to Codex."""
+    client = get_http_client()
+    while time.time() < state["expires_at"]:
+        await asyncio.sleep(state["interval"])
+        try:
+            poll_resp = await client.post(
+                f"{_CODEX_ISSUER}/api/accounts/deviceauth/token",
+                json={
+                    "device_auth_id": state["device_auth_id"],
+                    "user_code": state["user_code"],
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=httpx.Timeout(15.0),
+            )
+        except Exception as e:
+            print(f"[openai-codex] poll error: {e!r}", flush=True)
+            continue
+
+        if poll_resp.status_code in {403, 404}:
+            continue
+        if poll_resp.status_code != 200:
+            state["status"] = "error"
+            state["error"] = f"OpenAI device auth returned {poll_resp.status_code}"
+            print(f"[openai-codex] failed: {state['error']}", flush=True)
+            return
+
+        try:
+            code_data = poll_resp.json()
+        except Exception:
+            state["status"] = "error"
+            state["error"] = "Invalid OpenAI device auth response"
+            return
+
+        authorization_code = code_data.get("authorization_code", "")
+        code_verifier = code_data.get("code_verifier", "")
+        if not authorization_code or not code_verifier:
+            state["status"] = "error"
+            state["error"] = "OpenAI device auth response was incomplete"
+            return
+
+        try:
+            token_resp = await client.post(
+                _CODEX_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": authorization_code,
+                    "redirect_uri": f"{_CODEX_ISSUER}/deviceauth/callback",
+                    "client_id": _CODEX_CLIENT_ID,
+                    "code_verifier": code_verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=httpx.Timeout(15.0),
+            )
+        except Exception as e:
+            state["status"] = "error"
+            state["error"] = f"OpenAI token exchange failed: {e}"
+            return
+
+        if token_resp.status_code != 200:
+            state["status"] = "error"
+            state["error"] = f"OpenAI token exchange returned {token_resp.status_code}"
+            print(f"[openai-codex] failed: {state['error']}", flush=True)
+            return
+
+        try:
+            tokens = token_resp.json()
+        except Exception:
+            state["status"] = "error"
+            state["error"] = "Invalid OpenAI token response"
+            return
+        if not tokens.get("access_token"):
+            state["status"] = "error"
+            state["error"] = "OpenAI token response did not include access_token"
+            return
+
+        _save_codex_auth_json(tokens)
+        _apply_oauth_provider_config("openai-codex", state.get("model", "") or "gpt-5.5", _CODEX_BASE_URL)
+        state["status"] = "authorized"
+        print("[openai-codex] authorized - restarting gateway", flush=True)
+        asyncio.create_task(gw.restart())
+        return
+
+    state["status"] = "expired"
+    print("[openai-codex] device code expired", flush=True)
+
+
+async def api_oauth_codex_delete(request: Request) -> Response:
+    global _codex_oauth_state
+    if err := guard(request):
+        return err
+    _delete_oauth_provider_state("openai-codex")
+    env = read_env(ENV_FILE)
+    env.pop("_MODEL_OPENAI_CODEX", None)
+    write_env(ENV_FILE, env)
+    _codex_oauth_state = None
+    return JSONResponse({"ok": True})
+
+
+async def api_oauth_codex_start(request: Request) -> Response:
+    global _codex_oauth_state
+    if err := guard(request):
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    model = str(body.get("model", "")).strip() or "gpt-5.5"
+
+    client = get_http_client()
+    try:
+        resp = await client.post(
+            f"{_CODEX_ISSUER}/api/accounts/deviceauth/usercode",
+            json={"client_id": _CODEX_CLIENT_ID},
+            headers={"Content-Type": "application/json"},
+            timeout=httpx.Timeout(15.0),
+        )
+    except Exception as e:
+        return JSONResponse({"error": f"Could not reach OpenAI auth: {e}"}, status_code=502)
+
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": f"OpenAI auth returned {resp.status_code}: {resp.text[:200]}"},
+            status_code=502,
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid response from OpenAI auth"}, status_code=502)
+
+    user_code = data.get("user_code", "")
+    device_auth_id = data.get("device_auth_id", "")
+    if not user_code or not device_auth_id:
+        return JSONResponse({"error": "OpenAI auth response was incomplete"}, status_code=502)
+
+    _codex_oauth_state = {
+        "device_auth_id": device_auth_id,
+        "user_code": user_code,
+        "verification_uri": f"{_CODEX_ISSUER}/codex/device",
+        "expires_at": time.time() + int(data.get("expires_in", 900) or 900),
+        "interval": max(3, int(data.get("interval", 5) or 5)),
+        "status": "pending",
+        "model": model,
+    }
+    asyncio.create_task(_poll_codex_device_auth(_codex_oauth_state))
+
+    return JSONResponse({
+        "user_code": user_code,
+        "verification_uri": _codex_oauth_state["verification_uri"],
+        "expires_in": int(data.get("expires_in", 900) or 900),
+    })
+
+
+async def api_oauth_codex_status(request: Request) -> Response:
+    if err := guard(request):
+        return err
+    if _codex_oauth_state is None:
+        if _has_codex_oauth_tokens():
+            return JSONResponse({"status": "authorized"})
+        return JSONResponse({"status": "none"})
+    return JSONResponse({
+        "status": _codex_oauth_state["status"],
+        "error": _codex_oauth_state.get("error", ""),
+    })
+
+
 def is_config_complete(data: dict[str, str] | None = None) -> bool:
     """Single source of truth for 'ready to run the gateway'.
 
@@ -573,7 +815,11 @@ def is_config_complete(data: dict[str, str] | None = None) -> bool:
     if data is None:
         data = read_env(ENV_FILE)
     has_model = bool(data.get("LLM_MODEL"))
-    has_provider = any(data.get(k) for k in PROVIDER_KEYS) or _has_xai_oauth_tokens()
+    has_provider = (
+        any(data.get(k) for k in PROVIDER_KEYS)
+        or _has_xai_oauth_tokens()
+        or _has_codex_oauth_tokens()
+    )
     return has_model and has_provider
 
 
@@ -982,6 +1228,8 @@ async def api_status(request: Request):
         {"configured": bool(data.get(k))}
         for k in PROVIDER_KEYS
     }
+    providers["OpenAI Codex"] = {"configured": _has_codex_oauth_tokens()}
+    providers["xAI Grok OAuth"] = {"configured": _has_xai_oauth_tokens()}
     channels = {
         name: {"configured": bool(v := data.get(key,"")) and v.lower() not in ("false","0","no")}
         for name, key in CHANNEL_MAP.items()
@@ -1445,6 +1693,9 @@ routes = [
     Route("/setup/api/oauth/xai/start",         api_oauth_xai_start,  methods=["POST"]),
     Route("/setup/api/oauth/xai/status",        api_oauth_xai_status),
     Route("/setup/api/oauth/xai",               api_oauth_xai_delete, methods=["DELETE"]),
+    Route("/setup/api/oauth/codex/start",       api_oauth_codex_start,  methods=["POST"]),
+    Route("/setup/api/oauth/codex/status",      api_oauth_codex_status),
+    Route("/setup/api/oauth/codex",             api_oauth_codex_delete, methods=["DELETE"]),
 
     # /setup/* typos return a real 404 — not a silent proxy fallthrough.
     Route("/setup/{path:path}",                 route_setup_404,     methods=ANY_METHOD),
