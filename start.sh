@@ -81,8 +81,9 @@ fs.chmodSync(path, 0o600);
 try {
   const url = new URL(process.env.GBRAIN_DATABASE_URL);
   const port = url.port || "(default)";
+  const isPooler = url.hostname.endsWith(".pooler.supabase.com");
   console.log(`[gbrain] database target ${url.hostname}:${port}`);
-  if (url.port === "5432") {
+  if (url.port === "5432" && !isPooler) {
     console.log("[gbrain] NOTE: Supabase direct port 5432 may be unreachable from Railway; use the pooler URL/port 6543 if connection is refused");
   }
 } catch {
