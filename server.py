@@ -165,10 +165,14 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 INFRA_ENV_EXACT = {
+    "ANTHROPIC_API_KEY",
     "DATABASE_URL",
+    "GITHUB_TOKEN",
     "HOME",
     "HERMES_HOME",
+    "OPENAI_API_KEY",
     "OPENCLAW_WORKSPACE",
+    "VOYAGE_API_KEY",
     "ZEROENTROPY_API_KEY",
     "ZEROENTROPHY_API_KEY",
 }

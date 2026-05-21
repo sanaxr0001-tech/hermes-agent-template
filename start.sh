@@ -38,6 +38,7 @@ rm -f /data/.hermes/gateway.pid
 # ── gbrain setup ─────────────────────────────────────────────────────────────
 echo "[gbrain] starting setup..."
 export GBRAIN_HOME="${GBRAIN_HOME:-/data}"
+export OPENCLAW_WORKSPACE="${OPENCLAW_WORKSPACE:-/data/.hermes}"
 if [ -n "${GBRAIN_DATABASE_URL}" ]; then
   export DATABASE_URL="${GBRAIN_DATABASE_URL}"
 fi
