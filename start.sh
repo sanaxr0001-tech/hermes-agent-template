@@ -103,33 +103,96 @@ run_gbrain_post_boot_setup() {
   echo "[gbrain] applying migrations..."
   gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 
-  if [ ! -f /data/.hermes/skills/RESOLVER.md ] || [ ! -d /data/.hermes/skills/brain-ops ]; then
-    echo "[gbrain] installing skillpack into hermes..."
-    if [ ! -d /opt/gbrain ]; then
-      echo "[gbrain] WARNING: /opt/gbrain source checkout not found; skillpack install skipped"
+  if [ ! -d /opt/gbrain ]; then
+    echo "[gbrain] WARNING: /opt/gbrain source checkout not found; skillpack setup skipped"
+  else
+    echo "[gbrain] ensuring Hermes skillpack files..."
+    if (cd /opt/gbrain && OPENCLAW_WORKSPACE=/data/.hermes gbrain skillpack scaffold --all --workspace /data/.hermes); then
+      echo "[gbrain] skillpack scaffold complete"
     else
-      if [ ! -f /data/.hermes/skills/RESOLVER.md ]; then
-        printf '# Hermes Skills Resolver\n\n' > /data/.hermes/skills/RESOLVER.md
-      fi
+      echo "[gbrain] WARNING: skillpack scaffold failed"
+    fi
 
-      if (cd /opt/gbrain && OPENCLAW_WORKSPACE=/data/.hermes gbrain skillpack scaffold --all) && [ -d /data/.hermes/skills/brain-ops ]; then
-        echo "[gbrain] skillpack scaffolded"
+    # The OpenClaw plugin scaffold list is smaller than gbrain's own
+    # skills/RESOLVER.md + manifest.json set. Hermes uses the gbrain doctor
+    # view, so restore the bundled skill dirs that doctor still routes to.
+    for _GBRAIN_SKILL in publish frontmatter-guard smoke-test ask-user setup cold-start migrate; do
+      if [ -d "/opt/gbrain/skills/${_GBRAIN_SKILL}" ] &&
+         [ ! -f "/data/.hermes/skills/${_GBRAIN_SKILL}/SKILL.md" ]; then
+        mkdir -p "/data/.hermes/skills/${_GBRAIN_SKILL}"
+        cp -R "/opt/gbrain/skills/${_GBRAIN_SKILL}/." "/data/.hermes/skills/${_GBRAIN_SKILL}/"
+        echo "[gbrain] restored skills/${_GBRAIN_SKILL}"
+      fi
+    done
+
+    # gbrain v0.33+ scaffold intentionally leaves routing files untouched, but
+    # `gbrain doctor` still validates resolver reachability and conformance.
+    # Publish the bundled dispatcher/manifest into Hermes so existing volumes
+    # with only a placeholder resolver self-heal on boot.
+    for _GBRAIN_META in RESOLVER.md manifest.json; do
+      if [ -f "/opt/gbrain/skills/${_GBRAIN_META}" ]; then
+        cp "/opt/gbrain/skills/${_GBRAIN_META}" "/data/.hermes/skills/.${_GBRAIN_META}.tmp" &&
+          mv "/data/.hermes/skills/.${_GBRAIN_META}.tmp" "/data/.hermes/skills/${_GBRAIN_META}" &&
+          echo "[gbrain] refreshed skills/${_GBRAIN_META}"
       else
-        echo "[gbrain] skillpack scaffold did not populate Hermes; trying skillpack install --all..."
-        if (cd /opt/gbrain && OPENCLAW_WORKSPACE=/data/.hermes gbrain skillpack install --all); then
-          echo "[gbrain] skillpack installed"
-        else
-          _SKILLPACK_STATUS=$?
-          if [ "$_SKILLPACK_STATUS" -eq 1 ]; then
-            echo "[gbrain] skillpack install completed with local-edit skips"
-          else
-            echo "[gbrain] WARNING: skillpack install failed"
-          fi
-        fi
+        echo "[gbrain] WARNING: /opt/gbrain/skills/${_GBRAIN_META} not found"
+      fi
+    done
+
+    node <<'NODE'
+const fs = require("fs");
+const path = "/data/.hermes/skills/RESOLVER.md";
+let resolver = fs.readFileSync(path, "utf8");
+const skill = "`skills/skillpack-harvest/SKILL.md`";
+const replacement = `| "harvest this skill into gbrain", "publish this skill to gbrain", "lift this skill upstream", "lift this skill back into gbrain", "publish my fork-only skill", "gbrain bundle", "harvest my skill into gbrain", "promote this skill to gbrain", "want this skill in the gbrain bundle", "custom skill into the gbrain core" | ${skill} |`;
+const pattern = /^\| .* \| `skills\/skillpack-harvest\/SKILL\.md` \|$/m;
+if (!resolver.includes("custom skill into the gbrain core") && pattern.test(resolver)) {
+  resolver = resolver.replace(pattern, replacement);
+  fs.writeFileSync(path, resolver);
+  console.log("[gbrain] patched skillpack-harvest resolver synonyms");
+}
+NODE
+
+    # Existing persistent volumes may carry pre-v0.37.3 copies of these bundled
+    # skills. Refresh them from the pinned /opt/gbrain source of truth so the
+    # v0.37.3 skill_brain_first doctor check sees the compliance metadata.
+    if [ -f /opt/gbrain/skills/functional-area-resolver/SKILL.md ] &&
+       [ -f /data/.hermes/skills/functional-area-resolver/SKILL.md ]; then
+      cp /opt/gbrain/skills/functional-area-resolver/SKILL.md /data/.hermes/skills/functional-area-resolver/SKILL.md
+      echo "[gbrain] refreshed functional-area-resolver brain-first metadata"
+    fi
+
+    if [ -f /opt/gbrain/skills/strategic-reading/SKILL.md ] &&
+       [ -f /data/.hermes/skills/strategic-reading/SKILL.md ]; then
+      cp /opt/gbrain/skills/strategic-reading/SKILL.md /data/.hermes/skills/strategic-reading/SKILL.md
+      echo "[gbrain] refreshed strategic-reading brain-first metadata"
+    fi
+
+    _RESOLVER_STATUS=0
+    gbrain check-resolvable --json --skills-dir /data/.hermes/skills >/tmp/gbrain-resolver-health.json 2>/tmp/gbrain-resolver-health.err || _RESOLVER_STATUS=$?
+    if node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync("/tmp/gbrain-resolver-health.json", "utf8"));
+const report = data.report || {};
+const summary = report.summary || {};
+const errors = Array.isArray(report.errors) ? report.errors.length : 0;
+const warnings = Array.isArray(report.warnings) ? report.warnings.length : 0;
+console.log(`[gbrain] resolver health ${report.ok ? "ok" : "fail"}: ${summary.reachable || 0}/${summary.total_skills || 0} reachable, ${errors} error(s), ${warnings} warning(s)`);
+for (const issue of (report.errors || []).slice(0, 12)) {
+  console.log(`[gbrain] resolver error ${issue.type || "unknown"}:${issue.skill || "unknown"}: ${issue.action || issue.message || ""}`);
+}
+process.exit(report.ok ? 0 : 1);
+'; then
+      :
+    else
+      if [ -s /tmp/gbrain-resolver-health.err ]; then
+        echo "[gbrain] resolver health stderr:"
+        sed -n '1,20p' /tmp/gbrain-resolver-health.err 2>/dev/null || true
+      fi
+      if [ "${_RESOLVER_STATUS}" -ne 0 ]; then
+        echo "[gbrain] WARNING: resolver health command exited ${_RESOLVER_STATUS}"
       fi
     fi
-  else
-    echo "[gbrain] skillpack already scaffolded"
   fi
   echo "[gbrain] setup complete"
 }
