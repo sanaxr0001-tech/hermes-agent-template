@@ -251,7 +251,7 @@ ensure_gbrain_default_source_repo() {
     return
   fi
 
-  if (cd /opt/gbrain && GBRAIN_SOURCE_PATH="${brain_repo}" GBRAIN_SOURCE_HEAD="${head_commit}" /opt/bun/bin/bun <<'BUN'
+  if (cd /opt/gbrain && GBRAIN_SOURCE_PATH="${brain_repo}" GBRAIN_SOURCE_HEAD="${head_commit}" /opt/bun/bin/bun - <<'BUN'
 import { loadConfig, toEngineConfig } from './src/core/config.ts';
 import { createEngine } from './src/core/engine-factory.ts';
 import { connectWithRetry } from './src/core/db.ts';
