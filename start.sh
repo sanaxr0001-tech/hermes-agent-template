@@ -103,6 +103,8 @@ run_gbrain_post_boot_setup() {
   echo "[gbrain] applying migrations..."
   gbrain apply-migrations --yes && echo "[gbrain] migrations done" || echo "[gbrain] WARNING: migrations failed"
 
+  ensure_gbrain_default_source_repo
+
   if [ ! -d /opt/gbrain ]; then
     echo "[gbrain] WARNING: /opt/gbrain source checkout not found; skillpack setup skipped"
   else
@@ -195,6 +197,98 @@ process.exit(report.ok ? 0 : 1);
     fi
   fi
   echo "[gbrain] setup complete"
+}
+
+ensure_gbrain_default_source_repo() {
+  if [ -z "${GBRAIN_DATABASE_URL}" ] || ! command -v gbrain >/dev/null 2>&1; then
+    return
+  fi
+
+  local brain_repo="${GBRAIN_SYNC_REPO:-/data/brain}"
+  local exported=0
+  mkdir -p "${brain_repo}"
+
+  if [ ! -d "${brain_repo}/.git" ]; then
+    echo "[gbrain] bootstrapping default source repo at ${brain_repo}"
+    if ! find "${brain_repo}" -type f \( -name '*.md' -o -name '*.mdx' \) -print -quit | grep -q .; then
+      if gbrain export --dir "${brain_repo}" >/tmp/gbrain-export.log 2>&1; then
+        exported=1
+        grep -E 'Export(ed|ing) [0-9]+ pages' /tmp/gbrain-export.log 2>/dev/null | tail -n 2 || true
+      else
+        echo "[gbrain] WARNING: initial DB export to ${brain_repo} failed"
+        sed -n '1,40p' /tmp/gbrain-export.log 2>/dev/null || true
+      fi
+    fi
+
+    git init -b main "${brain_repo}" >/dev/null 2>&1 || git init "${brain_repo}" >/dev/null 2>&1 || {
+      echo "[gbrain] WARNING: could not initialize git repo at ${brain_repo}"
+      return
+    }
+  fi
+
+  git -C "${brain_repo}" config user.email "hermes-agent@railway.local" || true
+  git -C "${brain_repo}" config user.name "Hermes Agent" || true
+
+  if ! git -C "${brain_repo}" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "${brain_repo}" add -A >/dev/null 2>&1 || true
+    git -C "${brain_repo}" commit -m "bootstrap gbrain source export" >/dev/null 2>&1 ||
+      git -C "${brain_repo}" commit --allow-empty -m "bootstrap empty gbrain source" >/dev/null 2>&1 ||
+      true
+  elif [ "${exported}" = "1" ] && ! git -C "${brain_repo}" diff --quiet --exit-code; then
+    git -C "${brain_repo}" add -A >/dev/null 2>&1 || true
+    git -C "${brain_repo}" commit -m "refresh gbrain source export" >/dev/null 2>&1 || true
+  fi
+
+  local head_commit
+  head_commit="$(git -C "${brain_repo}" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "${head_commit}" ]; then
+    echo "[gbrain] WARNING: ${brain_repo} has no git HEAD; source sync metadata not updated"
+    return
+  fi
+
+  if [ ! -d /opt/gbrain ]; then
+    echo "[gbrain] WARNING: /opt/gbrain source checkout not found; cannot update sources.default"
+    return
+  fi
+
+  if (cd /opt/gbrain && GBRAIN_SOURCE_PATH="${brain_repo}" GBRAIN_SOURCE_HEAD="${head_commit}" /opt/bun/bin/bun <<'BUN'
+import { loadConfig, toEngineConfig } from './src/core/config.ts';
+import { createEngine } from './src/core/engine-factory.ts';
+import { connectWithRetry } from './src/core/db.ts';
+
+const config = loadConfig();
+if (!config) throw new Error('No gbrain config found');
+
+const engineConfig = toEngineConfig(config);
+const engine = await createEngine(engineConfig);
+await connectWithRetry(engine, engineConfig, { noRetry: true });
+
+const sourcePath = process.env.GBRAIN_SOURCE_PATH;
+const head = process.env.GBRAIN_SOURCE_HEAD;
+await engine.executeRaw(
+  `INSERT INTO sources (id, name, local_path, last_commit, last_sync_at, config)
+      VALUES ('default', 'default', $1, $2, now(), '{"federated": true}'::jsonb)
+    ON CONFLICT (id) DO UPDATE
+      SET local_path = EXCLUDED.local_path,
+          last_commit = COALESCE(sources.last_commit, EXCLUDED.last_commit),
+          last_sync_at = COALESCE(sources.last_sync_at, now()),
+          config = COALESCE(sources.config, '{}'::jsonb) || '{"federated": true}'::jsonb`,
+  [sourcePath, head],
+);
+
+const rows = await engine.executeRaw(
+  `SELECT local_path, last_commit, last_sync_at FROM sources WHERE id = 'default' LIMIT 1`,
+);
+await engine.disconnect();
+
+const row = rows[0] || {};
+console.log(`[gbrain] default source local_path=${row.local_path || 'unset'} last_commit=${String(row.last_commit || '').slice(0, 8) || 'unset'} last_sync_at=${row.last_sync_at ? 'set' : 'unset'}`);
+BUN
+  ); then
+    :
+  else
+    echo "[gbrain] WARNING: failed to update sources.default sync metadata"
+  fi
 }
 
 if [ -n "${GBRAIN_DATABASE_URL}" ] && command -v gbrain >/dev/null 2>&1; then
