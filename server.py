@@ -1402,6 +1402,29 @@ It may still be starting up, or it may have crashed.</p>
 </body></html>""" % HERMES_DASHBOARD_PORT
 
 
+def _filter_dashboard_plugins(content: bytes) -> bytes:
+    """Hide Hermes' bundled test plugin when its frontend bundle is absent."""
+    try:
+        plugins = json.loads(content.decode("utf-8"))
+    except Exception:
+        return content
+    if not isinstance(plugins, list):
+        return content
+
+    filtered = []
+    removed = []
+    for plugin in plugins:
+        if isinstance(plugin, dict) and plugin.get("name") == "example":
+            removed.append("example")
+            continue
+        filtered.append(plugin)
+
+    if removed:
+        print(f"[proxy] filtered dashboard plugin(s): {', '.join(removed)}", flush=True)
+        return json.dumps(filtered, separators=(",", ":")).encode("utf-8")
+    return content
+
+
 async def _proxy_to_dashboard(request: Request) -> Response:
     """Forward an authenticated request to the Hermes dashboard subprocess.
 
@@ -1451,6 +1474,13 @@ async def _proxy_to_dashboard(request: Request) -> Response:
 
     content = upstream.content
     content_type = upstream.headers.get("content-type", "").lower()
+
+    # Hermes ships an "example" dashboard plugin in the API response for test
+    # coverage, but the production wheel does not include its dist bundle. If
+    # passed through, the browser fetches /dashboard-plugins/example/... and
+    # the proxy logs a noisy 404 on every dashboard load.
+    if request.url.path == "/api/dashboard/plugins" and "application/json" in content_type:
+        content = _filter_dashboard_plugins(content)
 
     # Inject the "← Setup" widget into HTML pages so users can always return.
     if "text/html" in content_type and b"</body>" in content:
