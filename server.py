@@ -21,6 +21,8 @@ Once configured, / proxies to the Hermes dashboard. A small "← Setup" widget i
 injected into every proxied HTML response so users can always return to the wizard.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
